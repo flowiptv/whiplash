@@ -84,7 +84,7 @@ def custom_card_action(el): print("clicked a whole focusable container card!")
 def open_home(el):
     global activelayout,focus
     activelayout = "main"
-    focus = "main:takeback"
+    focus = "main"
 def open_movies(el): sidebar_open()
 def open_about(el): print("opening about page!")
 
@@ -95,6 +95,11 @@ def sidebar_open():
     sidebar_focus = first_sidebar_focus()
     if sidebar_focus:
         focus = sidebar_focus
+
+def set_layout(id):
+    global activelayout,focus
+    activelayout = id
+    focus = id
 # legacy fallback for older layouts that still use string actions
 action_map = {
     "play_media": play_movie,
@@ -157,7 +162,7 @@ layouts = {
                         "width": 48,
                         "scroll": True,
                         "anim_speed": 0.15,
-                        "anim_type": "ease_out",
+                        
                         "elements": [
                             {"id": "item1", "type": "button", "label": "Media Item #1", "height": 5, "margin": 0.5, "action": play_movie},
                             {"id": "item2", "type": "button", "label": "Media Item #2", "height": 5, "margin": 0.5, "action": play_movie},
@@ -194,7 +199,7 @@ sidebar_items = [
 # RUNTIME STATE
 # =========================================================
 activelayout = "main"
-focus = "main:content:top_bar:home_top"  # started on a leaf element instead of a container
+focus = "main"  # started on a leaf element instead of a container
 last_content_focus = focus
 
 screen = pg.display.set_mode((int(1920 / 2), int(1080 / 2)))
@@ -202,6 +207,7 @@ clock = pg.time.Clock()
 cell_w = screen.get_width() / 48
 cell_h = screen.get_height() / 27
 font = pg.font.Font("whiplash/font.ttf", int(cell_h))
+fontsm = pg.font.Font("whiplash/font.ttf", int(cell_h/2))
 
 layout_registry = {}
 sidebar_registry = {}
@@ -514,7 +520,10 @@ def render_gui(element, x=0, y=0, parent_w=48, parent_h=27, current_path="", tar
                 pg.draw.line(target_surf, t("border_color"), rect.topright, rect.bottomleft, 1)
 
         elif el_type == "label" and "label" in element:
-            text_surf = font.render(element["label"], True, t("text_soft_color"))
+            if "small" in element:
+                text_surf = fontsm.render(element["label"], True, t("text_soft_color"))
+            else:
+                text_surf = font.render(element["label"], True, t("text_soft_color"))
             target_surf.blit(text_surf, text_surf.get_rect(left=rect.left + 6, centery=rect.centery))
 
         elif el_type == "progress":
@@ -778,5 +787,3 @@ def mainloop():
 
     save_config(config, CONFIG_PATH)
     pg.quit()
-
-mainloop()

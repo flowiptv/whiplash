@@ -6,4 +6,4 @@ A library for displaying TV-friendly GUI.
 - python3
 
 ## docs
-idk, figure it out on your own.
+see DOCS.md
