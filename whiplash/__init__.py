@@ -66,6 +66,36 @@ def save_config(cfg, path=CONFIG_PATH):
     except Exception as exc:
         print(f"config save failed: {exc}")
 
+def get_element_pointer(path):
+    if not path:
+        return None
+        
+    parts = path.split(":")
+    layout_id = parts[0]
+    
+    # grab the root layout
+    if layout_id not in layouts:
+        return None
+        
+    current = layouts[layout_id]
+    
+    # traverse down the elements tree
+    for part in parts[1:]:
+        if not isinstance(current, dict) or "elements" not in current:
+            return None
+            
+        found = None
+        for child in current["elements"]:
+            if child.get("id") == part:
+                found = child
+                break
+                
+        if found is None:
+            return None
+        current = found
+        
+    return current
+
 config = load_config()
 theme = config["theme"]
 
@@ -88,6 +118,12 @@ def open_home(el):
 def open_movies(el): sidebar_open()
 def open_about(el): print("opening about page!")
 
+def handle_search_submit(el):
+    print(f"text input committed! current search query value is now: '{el.get('value')}'")
+
+def handle_checkbox_toggle(el):
+    print(f"checkbox element '{el.get('id')}' updated state to: {el.get('checked')}")
+
 
 def sidebar_open():
     global focus
@@ -100,7 +136,7 @@ def set_layout(id):
     global activelayout,focus
     activelayout = id
     focus = id
-# legacy fallback for older layouts that still use string actions
+
 action_map = {
     "play_media": play_movie,
     "open_settings": open_settings,
@@ -144,14 +180,15 @@ layouts = {
                         ]
                     },
                     {
-                        "id": "absolute_zone",
-                        "type": "scatter",
-                        "height": 8,
+                        "id": "interactive_inputs",
+                        "type": "list",
+                        "direction": "horizontal",
+                        "height": 5,
                         "width": 48,
-                        "margin": 1,
-                        "focus": True,
+                        "stretch": True,
                         "elements": [
-                            {"id": "float1", "type": "progress", "x": 1, "y": 1, "width": 10, "height": 2, "value": 50, "max": 100},
+                            {"id": "search_input", "type": "textinput", "label": "Search Media", "value": "", "placeholder": "Press Enter to type...", "margin": 1, "action": handle_search_submit},
+                            {"id": "autoplay_toggle", "type": "checkbox", "label": "Autoplay Trailer Videos", "checked": True, "margin": 1, "action": handle_checkbox_toggle},
                         ]
                     },
                     {
@@ -162,11 +199,10 @@ layouts = {
                         "width": 48,
                         "scroll": True,
                         "anim_speed": 0.15,
-                        
                         "elements": [
+                            {"id": "img_item", "type": "button", "label": "Image Card fallback", "image": "assets/poster.png", "height": 5, "margin": 0.5, "action": play_movie},
                             {"id": "item1", "type": "button", "label": "Media Item #1", "height": 5, "margin": 0.5, "action": play_movie},
-                            {"id": "item2", "type": "button", "label": "Media Item #2", "height": 5, "margin": 0.5, "action": play_movie},
-                            {"id": "item3", "type": "button", "label": "Media Item #3", "height": 5, "margin": 0.5, "action": play_movie}
+                            {"id": "item2", "type": "button", "label": "Media Item #2", "height": 5, "margin": 0.5, "action": play_movie}
                         ]
                     }
                 ]
@@ -182,11 +218,10 @@ layouts = {
         "stretch": False,
         "elements": [{"id": "label1", "type": "label", "label": "Hello, World! Layout 2!", "height": 4}, {"id": "takeback","type":"button","height": 4,"label": "take me back!","action":"open_home"}]
     }
-
 }
 
 # =========================================================
-# SIDEBAR (NOT PART OF LAYOUT)
+# SIDEBAR
 # =========================================================
 sidebar_items = [
     {"id": "home", "type": "button", "label": "home", "height": 3, "action": open_home},
@@ -199,15 +234,24 @@ sidebar_items = [
 # RUNTIME STATE
 # =========================================================
 activelayout = "main"
-focus = "main"  # started on a leaf element instead of a container
+focus = "main"
 last_content_focus = focus
 
 screen = pg.display.set_mode((int(1920 / 2), int(1080 / 2)))
 clock = pg.time.Clock()
 cell_w = screen.get_width() / 48
 cell_h = screen.get_height() / 27
-font = pg.font.Font("whiplash/font.ttf", int(cell_h))
-fontsm = pg.font.Font("whiplash/font.ttf", int(cell_h/2))
+
+def get_font(size):
+    try:
+        return pg.font.Font("whiplash/font.ttf", int(size))
+    except IOError:
+        return pg.font.SysFont("Arial", int(size))
+
+font = get_font(cell_h)
+fontsm = get_font(cell_h / 2)
+font_osk = get_font(cell_h)
+font_osk_big = get_font(cell_h * 1.5)
 
 layout_registry = {}
 sidebar_registry = {}
@@ -222,19 +266,70 @@ sidebar_state = {
 
 focus_anim = {"x": 0, "y": 0, "w": 0, "h": 0, "tx": 0, "ty": 0, "tw": 0, "th": 0, "active": False}
 
+# On-Screen Keyboard Configuration State
+osk_state = {
+    "target_active": False,
+    "anim": 0.0,
+    "target_el": None,
+    "buffer": "",
+    "cursor_pos": 0,  # tracks current letter slice index position
+    "layer": "abc",   # 'abc', 'ABC', or 'SYM'
+    "row": 0,
+    "col": 0
+}
+
+# complete layout grids rewritten with natural column lengths and strict category separations
+OSK_LAYERS = {
+    "abc": [
+        ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"],
+        ["q", "w", "e", "r", "t", "y", "u", "i", "o", "p"],
+        ["a", "s", "d", "f", "g", "h", "j", "k", "l", "'"],
+        ["z", "x", "c", "v", "b", "n", "m", ",", ".", "?"],
+        ["ABC", "!@#", "<-", "__________", "__________", "__________", "->", "<--", "×", "✓"]
+    ],
+    "ABC": [
+        ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"],
+        ["Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P"],
+        ["A", "S", "D", "F", "G", "H", "J", "K", "L", "'"],
+        ["Z", "X", "C", "V", "B", "N", "M", ",", ".", "?"],
+        ["abc", "!@#", "<-", "__________", "__________", "__________", "->", "<--", "×", "✓"]
+    ],
+    "!@#": [
+        ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"],
+        ["-", "_", "=", "+", "[", "]", "{", "}", ";", ":"],
+        [".", ",", "/", "?", "\\", "|", "@", "#", "$", "%"],
+        ["^", "&", "*", "(", ")", "!", "<", ">", "'", '"'],
+        ["abc", "ABC", "<-", "__________", "__________", "__________", "->", "<--", "×", "✓"]
+    ]
+}
+
+# Image Asset Caching Handler Function
+def get_cached_image(path, size):
+    cache_key = (path, size)
+    if cache_key in image_cache:
+        return image_cache[cache_key]
+    
+    if os.path.exists(path):
+        try:
+            surface = pg.image.load(path).convert_alpha()
+            scaled_surface = pg.transform.smoothscale(surface, size)
+            image_cache[cache_key] = scaled_surface
+            return scaled_surface
+        except Exception as e:
+            print(f"image loading failure: {e}")
+    return None
+
 # =========================================================
 # ANIMATION
 # =========================================================
 def advance_anim(current, target, speed, anim_type="ease_out", steps=0):
     if abs(target - current) < 0.01:
         return target
-
     if anim_type == "ease_out":
         return current + (target - current) * speed
     if anim_type == "linear":
         step_amt = speed if steps == 0 else (target - current) / steps
-        if target > current:
-            return min(current + step_amt, target)
+        if target > current: return min(current + step_amt, target)
         return max(current - step_amt, target)
     return target
 
@@ -242,8 +337,7 @@ def advance_anim(current, target, speed, anim_type="ease_out", steps=0):
 # THEME DRAW HELPERS
 # =========================================================
 def clamp_radius(value, rect):
-    if value <= 0:
-        return 0
+    if value <= 0: return 0
     return int(min(value, rect.width // 2, rect.height // 2))
 
 def draw_rect(surface, color, rect, border=0, radius=None):
@@ -254,6 +348,15 @@ def draw_rect(surface, color, rect, border=0, radius=None):
 # ACTIONS
 # =========================================================
 def run_action(el):
+    if el.get("type") == "checkbox":
+        el["checked"] = not el.get("checked", False)
+        action = el.get("action")
+        if callable(action): action(el)
+        return
+    elif el.get("type") == "textinput":
+        open_osk(el)
+        return
+
     action = el.get("action")
     if callable(action):
         action(el)
@@ -301,35 +404,26 @@ def close_sidebar():
 
 def first_sidebar_focus():
     for item in sidebar_items:
-        if item.get("type") in ("button", "toggle", "slider"):
+        if item.get("type") in ("button", "toggle", "slider", "checkbox", "textinput"):
             return f"sidebar:{item['id']}"
     return None
 
-def content_items_from_registry():
-    return layout_registry
-
-def sidebar_items_from_registry():
-    return sidebar_registry
+def content_items_from_registry(): return layout_registry
+def sidebar_items_from_registry(): return sidebar_registry
 
 # =========================================================
 # FOCUS CONVERGENCE HELPERS
 # =========================================================
 def is_focusable_leaf(el):
-    """checks if an element type is inherently interactive and selectable."""
-    return el.get("type") in ("button", "toggle", "slider") or el.get("focus")
+    return el.get("type") in ("button", "toggle", "slider", "checkbox", "textinput") or el.get("focus")
 
 def find_deepest_focusable(el, current_path):
-    """recursively finds the first focusable interactive element inside a container."""
     el_id = el.get("id", "")
     path = f"{current_path}:{el_id}" if current_path else el_id
-    
-    if is_focusable_leaf(el):
-        return path
-        
+    if is_focusable_leaf(el): return path
     for child in el.get("elements", []):
         leaf_path = find_deepest_focusable(child, path)
-        if leaf_path:
-            return leaf_path
+        if leaf_path: return leaf_path
     return None
 
 # =========================================================
@@ -340,46 +434,28 @@ def handle_layout_input(direction):
 
     if is_sidebar_path(focus):
         reg = sidebar_items_from_registry()
-
         if direction in ("left", "right"):
             focus = last_content_focus if last_content_focus in layout_registry else next(iter(layout_registry), last_content_focus)
             close_sidebar()
             return
-
-        if not reg or focus not in reg:
-            return
+        if not reg or focus not in reg: return
 
         curr_x, curr_y, curr_w, curr_h = reg[focus]
         best_target, min_dist = None, float("inf")
-
         for path, (tx, ty, tw, th) in reg.items():
-            if path == focus:
-                continue
-
+            if path == focus: continue
             dx = (tx + tw / 2) - (curr_x + curr_w / 2)
             node_dy = (ty + th / 2) - (curr_y + curr_h / 2)
-
-            if direction == "up" and node_dy >= -0.01:
-                continue
-            if direction == "down" and node_dy <= 0.01:
-                continue
-            if direction == "left" and dx >= -0.01:
-                continue
-            if direction == "right" and dx <= 0.01:
-                continue
-
+            if direction == "up" and node_dy >= -0.01: continue
+            if direction == "down" and node_dy <= 0.01: continue
             dist = dx**2 + (node_dy**2 * 500) if direction in ("left", "right") else (dx**2 * 500) + node_dy**2
             if dist < min_dist:
                 min_dist = dist
                 best_target = path
-
-        if best_target:
-            focus = best_target
+        if best_target: focus = best_target
         return
 
     reg = content_items_from_registry()
-    
-    # fallback convergence: if current focus somehow became a container or got orphaned, lock to closest element
     if not reg or focus not in reg:
         if reg:
             focus = next(iter(reg))
@@ -390,20 +466,14 @@ def handle_layout_input(direction):
     best_target, min_dist = None, float("inf")
 
     for path, (tx, ty, tw, th) in reg.items():
-        if path == focus:
-            continue
-
+        if path == focus: continue
         dx = (tx + tw / 2) - (curr_x + curr_w / 2)
         node_dy = (ty + th / 2) - (curr_y + curr_h / 2)
 
-        if direction == "up" and node_dy >= -0.01:
-            continue
-        if direction == "down" and node_dy <= 0.01:
-            continue
-        if direction == "left" and dx >= -0.01:
-            continue
-        if direction == "right" and dx <= 0.01:
-            continue
+        if direction == "up" and node_dy >= -0.01: continue
+        if direction == "down" and node_dy <= 0.01: continue
+        if direction == "left" and dx >= -0.01: continue
+        if direction == "right" and dx <= 0.01: continue
 
         dist = dx**2 + (node_dy**2 * 500) if direction in ("left", "right") else (dx**2 * 500) + node_dy**2
         if dist < min_dist:
@@ -418,8 +488,7 @@ def handle_layout_input(direction):
     if direction == "left" and not sidebar_state["open"]:
         open_sidebar()
         sidebar_focus = first_sidebar_focus()
-        if sidebar_focus:
-            focus = sidebar_focus
+        if sidebar_focus: focus = sidebar_focus
         return
 
 def handle_focus_memory():
@@ -428,24 +497,196 @@ def handle_focus_memory():
         if focus in layout_registry:
             last_content_focus = focus
         elif layout_registry:
-            # if focus lands on a container structural path, break down until a valid leaf is found
             el = get_element_by_path(focus)
             if el:
                 deep_leaf = find_deepest_focusable(el, ":".join(focus.split(":")[:-1]))
                 if deep_leaf and deep_leaf in layout_registry:
                     focus = deep_leaf
                     last_content_focus = focus
+        if sidebar_state["open"]: close_sidebar()
 
-        if sidebar_state["open"]:
-            close_sidebar()
+# =========================================================
+# TV ON-SCREEN KEYBOARD LOGIC
+# =========================================================
+def open_osk(element):
+    osk_state["target_active"] = True
+    osk_state["target_el"] = element
+    osk_state["buffer"] = element.get("value", "")
+    osk_state["cursor_pos"] = len(osk_state["buffer"])
+    osk_state["layer"] = "abc"
+    osk_state["row"] = 0
+    osk_state["col"] = 0
+
+def handle_osk_input(direction):
+    grid = OSK_LAYERS[osk_state["layer"]]
+    r, c = osk_state["row"], osk_state["col"]
+    orig_r, orig_c = r, c
+
+    if direction == "right":
+        current_key = grid[r][c]
+        while True:
+            c = (c + 1) % len(grid[r])
+            if grid[r][c] != current_key and grid[r][c] != "":
+                while c > 0 and grid[r][c] == grid[r][c - 1]:
+                    c -= 1
+                break
+            if c == orig_c:
+                break
+    elif direction == "left":
+        while c > 0 and grid[r][c] == grid[r][c - 1]:
+            c -= 1
+        current_key = grid[r][c]
+        while True:
+            c = (c - 1) % len(grid[r])
+            if grid[r][c] != current_key and grid[r][c] != "":
+                while c > 0 and grid[r][c] == grid[r][c - 1]:
+                    c -= 1
+                break
+            if c == orig_c:
+                break
+    elif direction in ("up", "down"):
+        if direction == "up": r = (r - 1) % len(grid)
+        else: r = (r + 1) % len(grid)
+        
+        if c >= len(grid[r]): c = len(grid[r]) - 1
+        if grid[r][c] == "":
+            while c > 0 and grid[r][c] == "":
+                c -= 1
+        while c > 0 and grid[r][c] == grid[r][c - 1]:
+            c -= 1
+
+    osk_state["row"], osk_state["col"] = r, c
+
+def select_osk_key():
+    grid = OSK_LAYERS[osk_state["layer"]]
+    key = grid[osk_state["row"]][osk_state["col"]]
+
+    if key in ("abc", "ABC", "!@#"):
+        osk_state["layer"] = key
+        if osk_state["row"] >= len(OSK_LAYERS[key]):
+            osk_state["row"] = len(OSK_LAYERS[key]) - 1
+        return
+
+    if key == "✓":
+        osk_state["target_el"]["value"] = osk_state["buffer"]
+        osk_state["target_active"] = False
+        action = osk_state["target_el"].get("action")
+        if callable(action): action(osk_state["target_el"])
+    elif key == "×":
+        osk_state["target_active"] = False
+    elif key == "<-":
+        osk_state["cursor_pos"] = max(0, osk_state["cursor_pos"] - 1)
+    elif key == "->":
+        osk_state["cursor_pos"] = min(len(osk_state["buffer"]), osk_state["cursor_pos"] + 1)
+    elif key == "<--":
+        pos = osk_state["cursor_pos"]
+        if pos > 0:
+            osk_state["buffer"] = osk_state["buffer"][:pos - 1] + osk_state["buffer"][pos:]
+            osk_state["cursor_pos"] -= 1
+    elif key == "__________":
+        pos = osk_state["cursor_pos"]
+        osk_state["buffer"] = osk_state["buffer"][:pos] + " " + osk_state["buffer"][pos:]
+        osk_state["cursor_pos"] += 1
+    elif key == "":
+        pass
+    else:
+        pos = osk_state["cursor_pos"]
+        osk_state["buffer"] = osk_state["buffer"][:pos] + key + osk_state["buffer"][pos:]
+        osk_state["cursor_pos"] += 1
+
+def render_osk():
+    if osk_state["anim"] <= 0.001:
+        return
+
+    overlay = pg.Surface((screen.get_width(), screen.get_height()), pg.SRCALPHA)
+    overlay.fill((10, 10, 12, int(220 * osk_state["anim"])))
+    screen.blit(overlay, (0, 0))
+
+    grid = OSK_LAYERS[osk_state["layer"]]
+    box_w, box_h = int(32 * cell_w), int(16 * cell_h)
+    box_x = (screen.get_width() - box_w) // 2
+    
+    target_center_y = (screen.get_height() - box_h) // 2
+    hidden_y = screen.get_height()
+    box_y = int(hidden_y + (target_center_y - hidden_y) * osk_state["anim"])
+
+    box_rect = pg.Rect(box_x, box_y, box_w, box_h)
+    draw_rect(screen, t("panel_color"), box_rect, 0)
+    draw_rect(screen, t("border_color"), box_rect, 2)
+
+    title_surf = fontsm.render(f"Input: {osk_state['target_el'].get('label', 'Text Field')}", True, t("muted_color"))
+    screen.blit(title_surf, (box_x + 20, box_y + 12))
+
+    input_bar_rect = pg.Rect(box_x + 20, box_y + 35, box_w - 40, int(1.8 * cell_h))
+    draw_rect(screen, t("button_color"), input_bar_rect, 0)
+    draw_rect(screen, t("button_border"), input_bar_rect, 1)
+
+    # render base background text buffer
+    
+    text_val_surf = font.render(osk_state["buffer"], True, t("text_color"))
+    screen.blit(text_val_surf, (input_bar_rect.left + 10, input_bar_rect.centery - text_val_surf.get_height() // 2))
+
+    # calculate text position and flash cursor rectangle precisely at cursor_pos
+    if (pg.time.get_ticks() // 400) % 2 == 0:
+        prefix_string = osk_state["buffer"][:osk_state["cursor_pos"]]
+        prefix_w = font.size(prefix_string)[0]
+        cursor_x = input_bar_rect.left + 10 + prefix_w
+        cursor_rect = pg.Rect(cursor_x, input_bar_rect.centery - font.get_height() // 2, 2, font.get_height())
+        pg.draw.rect(screen, t("text_color"), cursor_rect)
+    else:
+        prefix_string = osk_state["buffer"][:osk_state["cursor_pos"]]
+        prefix_w = font.size(prefix_string)[0]
+        cursor_x = input_bar_rect.left + 10 + prefix_w
+        cursor_rect = pg.Rect(cursor_x, input_bar_rect.centery - font.get_height() // 2, 2, font.get_height())
+        pg.draw.rect(screen, t("muted_color"), cursor_rect)
+
+    start_keys_y = box_y + 82
+    row_h = int(2.2 * cell_h)
+
+    for r_idx, row in enumerate(grid):
+        total_keys = len(row)
+        avail_w = box_w - 40
+        key_w = avail_w // total_keys
+
+        visited_cols = set()
+        for c_idx, key in enumerate(row):
+            if c_idx in visited_cols: continue
+
+            span = 1
+            while c_idx + span < total_keys and row[c_idx + span] == key:
+                span += 1
+
+            for s in range(span): visited_cols.add(c_idx + s)
+
+            kx = box_x + 20 + (c_idx * key_w)
+            ky = start_keys_y + (r_idx * row_h)
+            k_rect = pg.Rect(kx, ky, (span * key_w) - 4, row_h - 4)
+
+            is_key_focused = False
+            if osk_state["row"] == r_idx:
+                for s in range(span):
+                    if osk_state["col"] == c_idx + s:
+                        is_key_focused = True
+                        break
+            if key != "": # dont draw empty space
+                bg_col = t("accent_color") if is_key_focused else t("button_color")
+                draw_rect(screen, bg_col, k_rect, 0)
+                if not is_key_focused:
+                    draw_rect(screen, t("button_border"), k_rect, 1)
+            if key != "×":
+                key_surf = font_osk.render(key, True, t("text_color"))
+                screen.blit(key_surf, key_surf.get_rect(center=k_rect.center))
+            else:
+                # the × key gets extra love
+                key_surf = font_osk_big.render(key, True, t("text_color"))
+                screen.blit(key_surf, key_surf.get_rect(center=k_rect.center))
 
 # =========================================================
 # RENDERING
 # =========================================================
 def render_gui(element, x=0, y=0, parent_w=48, parent_h=27, current_path="", target_surf=None, gx=0, gy=0, selectable=True):
     global layout_registry, scroll_states, focus_anim
-    if target_surf is None:
-        target_surf = screen
+    if target_surf is None: target_surf = screen
 
     el_id = element.get("id", "")
     current_path = f"{current_path}:{el_id}" if current_path else el_id
@@ -458,123 +699,83 @@ def render_gui(element, x=0, y=0, parent_w=48, parent_h=27, current_path="", tar
 
     rect = pg.Rect(int(local_x * cell_w), int(local_y * cell_h), int(w * cell_w), int(h * cell_h))
     el_type = element.get("type", "list")
-
     is_focused = (focus == current_path)
 
-    if is_focused and selectable:
+    if is_focused and selectable and not osk_state["target_active"]:
         focus_anim["active"] = True
         focus_anim["tx"] = int((gx + local_x) * cell_w)
         focus_anim["ty"] = int((gy + local_y) * cell_h)
         focus_anim["tw"] = int(w * cell_w)
         focus_anim["th"] = int(h * cell_h)
 
-    # only register actual interactable components into the navigation tree
     if is_focusable_leaf(element):
-        if selectable:
-            layout_registry[current_path] = (gx + local_x, gy + local_y, w, h)
-
+        if selectable: layout_registry[current_path] = (gx + local_x, gy + local_y, w, h)
         draw_rect(target_surf, t("button_color"), rect, 0)
         draw_rect(target_surf, t("button_border"), rect, 1)
 
-        if "label" in element:
-            text_surf = font.render(element["label"], True, t("text_color"))
-            target_surf.blit(text_surf, text_surf.get_rect(center=rect.center))
-        if el_type != "scatter":
-            return
+        if el_type == "button":
+            image_drawn = False
+            if "image" in element:
+                img_size = (int(rect.width - 12), int(rect.height - 12))
+                if img_size[0] > 0 and img_size[1] > 0:
+                    img_surf = get_cached_image(element["image"], img_size)
+                    if img_surf:
+                        target_surf.blit(img_surf, img_surf.get_rect(center=rect.center))
+                        image_drawn = True
+
+            if not image_drawn and "label" in element:
+                text_surf = font.render(element["label"], True, t("text_color"))
+                target_surf.blit(text_surf, text_surf.get_rect(center=rect.center))
+            
+        elif el_type == "checkbox":
+            text_surf = font.render(element.get("label", ""), True, t("text_color"))
+            target_surf.blit(text_surf, text_surf.get_rect(left=rect.left + 15, centery=rect.centery))
+            
+            box_sz = int(rect.height * 0.45)
+            box_rect = pg.Rect(rect.right - box_sz - 15, rect.centery - box_sz // 2, box_sz, box_sz)
+            draw_rect(target_surf, t("panel_color"), box_rect, 0, radius=4)
+            draw_rect(target_surf, t("border_color"), box_rect, 1, radius=4)
+            
+            if element.get("checked", False):
+                inner_sz = box_sz - 6
+                draw_rect(target_surf, t("accent_color"), pg.Rect(box_rect.left + 3, box_rect.top + 3, inner_sz, inner_sz), 0, radius=2)
+
+        elif el_type == "textinput":
+            lbl_surf = fontsm.render(element.get("label", ""), True, t("muted_color"))
+            target_surf.blit(lbl_surf, (rect.left + 12, rect.top + 4))
+            
+            val_string = element.get("value", "")
+            display_color = t("text_color") if val_string else t("muted_color")
+            if not val_string: val_string = element.get("placeholder", "")
+                
+            val_surf = font.render(val_string, True, display_color)
+            target_surf.blit(val_surf, (rect.left + 12, rect.bottom - val_surf.get_height() - 6))
+        return
 
     if el_type in ("image", "label", "progress"):
-        if el_type == "image":
-            draw_rect(target_surf, t("panel_alt_color"), rect, 0)
-
-            image_obj = element.get("surface", element.get("image_surface"))
-            image_path = element.get("image_path", element.get("path"))
-
-            if isinstance(image_obj, pg.Surface):
-                image_surf = image_obj
-            elif isinstance(image_path, str) and image_path:
-                if image_path not in image_cache:
-                    try:
-                        image_cache[image_path] = pg.image.load(image_path).convert_alpha()
-                    except Exception as exc:
-                        print(f"image load failed for {image_path}: {exc}")
-                        image_cache[image_path] = None
-                image_surf = image_cache.get(image_path)
-            else:
-                image_surf = None
-
-            if image_surf is not None:
-                fit_mode = element.get("fit", "contain")
-                if fit_mode == "stretch":
-                    scaled = pg.transform.smoothscale(image_surf, (rect.width, rect.height))
-                    target_surf.blit(scaled, rect)
-                else:
-                    iw, ih = image_surf.get_size()
-                    if iw > 0 and ih > 0:
-                        scale = min(rect.width / iw, rect.height / ih)
-                        new_size = (max(1, int(iw * scale)), max(1, int(ih * scale)))
-                        scaled = pg.transform.smoothscale(image_surf, new_size)
-                        dest = scaled.get_rect(center=rect.center)
-                        target_surf.blit(scaled, dest)
-            else:
-                pg.draw.line(target_surf, t("border_color"), rect.topleft, rect.bottomright, 1)
-                pg.draw.line(target_surf, t("border_color"), rect.topright, rect.bottomleft, 1)
-
-        elif el_type == "label" and "label" in element:
-            if "small" in element:
-                text_surf = fontsm.render(element["label"], True, t("text_soft_color"))
-            else:
-                text_surf = font.render(element["label"], True, t("text_soft_color"))
+        if el_type == "label" and "label" in element:
+            text_surf = fontsm.render(element["label"], True, t("text_soft_color")) if "small" in element else font.render(element["label"], True, t("text_soft_color"))
             target_surf.blit(text_surf, text_surf.get_rect(left=rect.left + 6, centery=rect.centery))
-
         elif el_type == "progress":
             draw_rect(target_surf, t("panel_color"), rect, 0)
             draw_rect(target_surf, t("border_color"), rect, 1)
-
-            value = element.get("value", element.get("current", 0))
-            maximum = element.get("max", element.get("maximum", 100))
-
-            try:
-                value = float(value)
-            except Exception:
-                value = 0.0
-
-            try:
-                maximum = float(maximum)
-            except Exception:
-                maximum = 100.0
-
-            if element.get("normalized", False) or maximum <= 1.0:
-                fraction = value
-            else:
-                fraction = value / maximum if maximum else 0.0
-
-            fraction = max(0.0, min(1.0, fraction))
-
+            value = float(element.get("value", 0))
+            maximum = float(element.get("max", 100))
+            fraction = max(0.0, min(1.0, value / maximum if maximum else 0.0))
+            
             pad = int(element.get("padding", 2))
             inner = rect.inflate(-pad * 2, -pad * 2)
-            inner.width = max(0, inner.width)
-            inner.height = max(0, inner.height)
-
             fill_w = int(inner.width * fraction)
             if fill_w > 0 and inner.height > 0:
-                fill_rect = pg.Rect(inner.left, inner.top, fill_w, inner.height)
-                draw_rect(target_surf, t("accent_color"), fill_rect, 0)
-
-            text = element.get("label")
-            if text is None and element.get("show_percent", True):
-                text = f"{int(round(fraction * 100))}%"
-            if text:
-                text_surf = font.render(str(text), True, t("text_color"))
-                target_surf.blit(text_surf, text_surf.get_rect(center=rect.center))
+                draw_rect(target_surf, t("accent_color"), pg.Rect(inner.left, inner.top, fill_w, inner.height), 0)
         return
 
-    # containers are structural only now, we don't store them in layout_registry
-    if not is_focusable_leaf(element): # Its just a big button with elements.
+    if not is_focusable_leaf(element):
         if not (el_id == activelayout or (rect.topleft == (0,0) and rect.bottomright == (screen.get_width(),screen.get_height()))):
             draw_rect(target_surf, t("panel_color"), rect, 0)
             draw_rect(target_surf, t("border_color"), rect, 1)
         else:
-            draw_rect(target_surf, t("panel_color"), rect, 0, 0) # might be a good idea to draw a square with no rounding
+            draw_rect(target_surf, t("panel_color"), rect, 0, 0)
 
     padding = element.get("padding", 0)
     content_x, content_y = local_x + padding, local_y + padding
@@ -586,16 +787,10 @@ def render_gui(element, x=0, y=0, parent_w=48, parent_h=27, current_path="", tar
 
         if el_type == "scatter":
             for child in child_list:
-                c_x = child.get("x", 0)
-                c_y = child.get("y", 0)
-                c_w = child.get("width", 5)
-                c_h = child.get("height", 5)
-                render_gui(child, content_x + c_x, content_y + c_y, c_w, c_h, current_path, target_surf, gx, gy, selectable)
+                render_gui(child, content_x + child.get("x", 0), content_y + child.get("y", 0), child.get("width", 5), child.get("height", 5), current_path, target_surf, gx, gy, selectable)
 
         elif element.get("scroll", False):
-            if el_id not in scroll_states:
-                scroll_states[el_id] = {"current": 0.0, "target": 0.0}
-
+            if el_id not in scroll_states: scroll_states[el_id] = {"current": 0.0, "target": 0.0}
             running_y = 0
             focused_child_y, focused_child_h = None, None
             child_layouts = []
@@ -603,83 +798,45 @@ def render_gui(element, x=0, y=0, parent_w=48, parent_h=27, current_path="", tar
             for child in child_list:
                 c_w = content_w if is_vertical else content_w / len(child_list)
                 c_h = child.get("height", content_h) if is_vertical else content_h
-
                 if focus.startswith(f"{current_path}:{child.get('id')}"):
                     focused_child_y, focused_child_h = running_y, c_h
-
                 child_layouts.append((child, c_w, c_h, running_y))
-                if is_vertical:
-                    running_y += c_h
+                if is_vertical: running_y += c_h
 
             if focused_child_y is not None:
                 t_scroll = scroll_states[el_id]["target"]
-                if focused_child_y < t_scroll:
-                    scroll_states[el_id]["target"] = focused_child_y
+                if focused_child_y < t_scroll: scroll_states[el_id]["target"] = focused_child_y
                 elif focused_child_y + focused_child_h > t_scroll + content_h:
                     scroll_states[el_id]["target"] = (focused_child_y + focused_child_h) - content_h
 
-            anim_speed = element.get("anim_speed", t("animation_speed", 0.25))
-            anim_type = element.get("anim_type", t("animation_type", "ease_out"))
-            anim_steps = element.get("anim_steps", 0)
-
-            scroll_states[el_id]["current"] = advance_anim(
-                scroll_states[el_id]["current"],
-                scroll_states[el_id]["target"],
-                anim_speed,
-                anim_type,
-                anim_steps
-            )
-
+            scroll_states[el_id]["current"] = advance_anim(scroll_states[el_id]["current"], scroll_states[el_id]["target"], element.get("anim_speed", t("animation_speed", 0.25)), element.get("anim_type", t("animation_type", "ease_out")), 0)
             clip_surface = pg.Surface((max(1, int(content_w * cell_w)), max(1, int(content_h * cell_h))))
             clip_surface.fill(tuple(t("panel_color")))
 
             for child, child_w, child_h, relative_y in child_layouts:
-                render_gui(
-                    child,
-                    0,
-                    relative_y - scroll_states[el_id]["current"],
-                    child_w,
-                    child_h,
-                    current_path,
-                    clip_surface,
-                    gx + content_x,
-                    gy + content_y,
-                    selectable
-                )
-
+                render_gui(child, 0, relative_y - scroll_states[el_id]["current"], child_w, child_h, current_path, clip_surface, gx + content_x, gy + content_y, selectable)
             target_surf.blit(clip_surface, (int(content_x * cell_w), int(content_y * cell_h)))
 
         else:
             cursor_x, cursor_y = content_x, content_y
             is_stretched = element.get("stretch", False)
-
             for child in child_list:
                 c_w = content_w if is_vertical else (content_w / len(child_list) if is_stretched else child.get("width", content_w))
                 c_h = content_h if not is_vertical else (content_h / len(child_list) if is_stretched else child.get("height", content_h))
                 render_gui(child, cursor_x, cursor_y, c_w, c_h, current_path, target_surf, gx, gy, selectable)
-                if is_vertical:
-                    cursor_y += c_h
-                else:
-                    cursor_x += c_w
+                if is_vertical: cursor_y += c_h
+                else: cursor_x += c_w
 
 def render_sidebar():
     global sidebar_registry, focus_anim
 
     sidebar_w = float(t("sidebar_width", 10))
-    sidebar_state["x"] = advance_anim(
-        sidebar_state["x"],
-        sidebar_state["tx"],
-        float(t("sidebar_animation_speed", 0.22)),
-        t("animation_type", "ease_out"),
-        0
-    )
+    sidebar_state["x"] = advance_anim(sidebar_state["x"], sidebar_state["tx"], float(t("sidebar_animation_speed", 0.22)), t("animation_type", "ease_out"), 0)
 
     x_cell = sidebar_state["x"]
-    if x_cell <= -sidebar_w + 0.05 and not sidebar_state["open"]:
-        return
+    if x_cell <= -sidebar_w + 0.05 and not sidebar_state["open"]: return
 
     sidebar_registry = {}
-
     sidebar_rect = pg.Rect(int(x_cell * cell_w), 0, int(sidebar_w * cell_w), screen.get_height())
     draw_rect(screen, t("panel_color"), sidebar_rect, 0)
     draw_rect(screen, t("border_color"), sidebar_rect, 1)
@@ -688,29 +845,19 @@ def render_sidebar():
     header_text = font.render("sidebar", True, t("accent_color"))
     screen.blit(header_text, header_text.get_rect(center=header_rect.center))
 
-    item_start_y = 4.0
-    item_h = 3.0
-    item_gap = 0.5
-
+    item_start_y, item_h, item_gap = 4.0, 3.0, 0.5
     for idx, item in enumerate(sidebar_items):
         item_y = item_start_y + idx * (item_h + item_gap)
-        item_rect = pg.Rect(
-            int((x_cell + 0.5) * cell_w),
-            int(item_y * cell_h),
-            int((sidebar_w - 1.0) * cell_w),
-            int(item_h * cell_h),
-        )
+        item_rect = pg.Rect(int((x_cell + 0.5) * cell_w), int(item_y * cell_h), int((sidebar_w - 1.0) * cell_w), int(item_h * cell_h))
 
         path = f"sidebar:{item['id']}"
         sidebar_registry[path] = (x_cell + 0.5, item_y, sidebar_w - 1.0, item_h)
 
         is_focused = (focus == path)
-        fill = t("button_color")
-        border = t("button_border")
-        if is_focused:
-            fill = t("panel_alt_color")
-            border = t("accent_color")
+        fill = t("panel_alt_color") if is_focused else t("button_color")
+        border = t("accent_color") if is_focused else t("button_border")
 
+        if is_focused and not osk_state["target_active"]:
             focus_anim["active"] = True
             focus_anim["tx"] = item_rect.left
             focus_anim["ty"] = item_rect.top
@@ -719,9 +866,16 @@ def render_sidebar():
 
         draw_rect(screen, fill, item_rect, 0)
         draw_rect(screen, border, item_rect, 1)
-
         label = font.render(item["label"], True, t("text_color"))
         screen.blit(label, label.get_rect(center=item_rect.center))
+
+def set_layouts(setlayouts):
+    global layouts
+    layouts = setlayouts
+
+def set_sidebar_items(items):
+    global sidebar_items
+    sidebar_items = items
 
 # =========================================================
 # MAIN LOOP
@@ -738,27 +892,35 @@ def mainloop():
                 running = False
             elif ev.type == pg.KEYDOWN:
                 if ev.key == pg.K_ESCAPE:
-                    running = False
-                elif ev.key == pg.K_UP:
-                    handle_layout_input("up")
-                elif ev.key == pg.K_DOWN:
-                    handle_layout_input("down")
-                elif ev.key == pg.K_LEFT:
-                    handle_layout_input("left")
-                elif ev.key == pg.K_RIGHT:
-                    handle_layout_input("right")
-                elif ev.key == pg.K_RETURN:
-                    if is_sidebar_path(focus):
-                        for item in sidebar_items:
-                            if focus == f"sidebar:{item['id']}":
-                                run_action(item)
-                                break
-                    else:
-                        el = get_element_by_path(focus)
-                        if el:
-                            run_action(el)
+                    if osk_state["target_active"]: osk_state["target_active"] = False
+                    else: running = False
+                
+                elif osk_state["target_active"]:
+                    if ev.key == pg.K_UP: handle_osk_input("up")
+                    elif ev.key == pg.K_DOWN: handle_osk_input("down")
+                    elif ev.key == pg.K_LEFT: handle_osk_input("left")
+                    elif ev.key == pg.K_RIGHT: handle_osk_input("right")
+                    elif ev.key == pg.K_RETURN: select_osk_key()
+                
+                else:
+                    if ev.key == pg.K_UP: handle_layout_input("up")
+                    elif ev.key == pg.K_DOWN: handle_layout_input("down")
+                    elif ev.key == pg.K_LEFT: handle_layout_input("left")
+                    elif ev.key == pg.K_RIGHT: handle_layout_input("right")
+                    elif ev.key == pg.K_RETURN:
+                        if is_sidebar_path(focus):
+                            for item in sidebar_items:
+                                if focus == f"sidebar:{item['id']}":
+                                    run_action(item)
+                                    break
+                        else:
+                            el = get_element_by_path(focus)
+                            if el: run_action(el)
 
-        handle_focus_memory()
+        if not osk_state["target_active"]:
+            handle_focus_memory()
+
+        osk_state["anim"] = advance_anim(osk_state["anim"], 1.0 if osk_state["target_active"] else 0.0, 0.18)
 
         screen.fill(tuple(t("background_color")))
         layout_registry.clear()
@@ -766,8 +928,10 @@ def mainloop():
 
         render_gui(layouts[activelayout])
         render_sidebar()
+        
+        render_osk()
 
-        if focus_anim["active"]:
+        if focus_anim["active"] and not osk_state["target_active"]:
             focus_anim["x"] = advance_anim(focus_anim["x"], focus_anim["tx"], float(t("animation_speed", 0.25)), t("animation_type", "ease_out"))
             focus_anim["y"] = advance_anim(focus_anim["y"], focus_anim["ty"], float(t("animation_speed", 0.25)), t("animation_type", "ease_out"))
             focus_anim["w"] = advance_anim(focus_anim["w"], focus_anim["tw"], float(t("animation_speed", 0.25)), t("animation_type", "ease_out"))
@@ -787,3 +951,5 @@ def mainloop():
 
     save_config(config, CONFIG_PATH)
     pg.quit()
+if __name__ == "__main__":
+    mainloop()
