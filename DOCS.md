@@ -11,7 +11,7 @@ Opens the sidebar and sets focus to the first element.
 ### `load_config(<path>) -> dict`
 Load a config from a path.
 
-### `save_config(<config:dict>, <path>) -> none`
+### `save_config(<config:dict>, <path>)`
 Save a config to a path.
 
 ### `set_layout(<id>)`
@@ -21,6 +21,9 @@ Sets the current layout to an id.
 Returns the element for a path.
 A path is a list of ids, with the layout element being first. Delimeted by `:`.
 Example: `main:list:button`
+
+### `set_appname(<name>)`
+Set the app name. Appears in the side bar.
 
 ## Layout and elements
 An element is raw json.
