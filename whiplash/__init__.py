@@ -105,26 +105,59 @@ def get_element_pointer(path):
         
     return current
 
+
+# =========================================================
+# CACHING SYSTEMS
+# =========================================================
+text_cache = {}
+gradient_cache = {}
+surface_cache = {}
+
+def clear_caches():
+    text_cache.clear()
+    gradient_cache.clear()
+    surface_cache.clear()
+
+def render_text(font_obj, text, color):
+    """caches rendered text surfaces to save massive cpu cycles!"""
+    c_tuple = tuple(color) if isinstance(color, list) else color
+    key = (id(font_obj), text, c_tuple)
+    if key not in text_cache:
+        text_cache[key] = font_obj.render(text, True, c_tuple)
+    return text_cache[key]
+
+def get_cached_surface(w, h, fill_color=None):
+    """call this to reuse surface sheets instead of creating new frames!"""
+    key = (w, h)
+    if key not in surface_cache:
+        surface_cache[key] = pg.Surface((w, h))
+    surf = surface_cache[key]
+    if fill_color:
+        surf.fill(tuple(fill_color) if isinstance(fill_color, list) else fill_color)
+    return surf
+
 def draw_linear_gradient(surface, color1, color2, rect, orientation='vertical'):
-    """Draws a smooth linear gradient onto a specific surface area, supporting transparency."""
-    # 1. Create a tiny 1x2 or 2x1 surface with alpha support (pg.SRCALPHA)
-    if orientation == 'vertical':
-        grad_surf = pg.Surface((1, 2), pg.SRCALPHA)
-    else:
-        grad_surf = pg.Surface((2, 1), pg.SRCALPHA)
-        
-    # 2. Assign the start and end colors to the two boundary pixels
-    grad_surf.set_at((0, 0), color1)
-    if orientation == 'vertical':
-        grad_surf.set_at((0, 1), color2)
-    else:
-        grad_surf.set_at((1, 0), color2)
-        
-    # 3. Use smoothscale to stretch the pixels into a perfect blend
-    grad_surf = pg.transform.smoothscale(grad_surf, (rect.width, rect.height))
+    """draws a smooth linear gradient using caching for maximum speed!"""
+    c1 = tuple(color1) if isinstance(color1, list) else color1
+    c2 = tuple(color2) if isinstance(color2, list) else color2
+    key = (c1, c2, rect.width, rect.height, orientation)
     
-    # 4. Draw the gradient onto the target surface
-    surface.blit(grad_surf, rect)
+    if key not in gradient_cache:
+        if orientation == 'vertical':
+            grad_surf = pg.Surface((1, 2), pg.SRCALPHA)
+        else:
+            grad_surf = pg.Surface((2, 1), pg.SRCALPHA)
+            
+        grad_surf.set_at((0, 0), c1)
+        if orientation == 'vertical':
+            grad_surf.set_at((0, 1), c2)
+        else:
+            grad_surf.set_at((1, 0), c2)
+            
+        gradient_cache[key] = pg.transform.smoothscale(grad_surf, (rect.width, rect.height))
+        
+    surface.blit(gradient_cache[key], rect)
+
 
 config = load_config()
 theme = config["theme"]
@@ -307,13 +340,12 @@ osk_state = {
     "anim": 0.0,
     "target_el": None,
     "buffer": "",
-    "cursor_pos": 0,  # tracks current letter slice index position
-    "layer": "abc",   # 'abc', 'ABC', or 'SYM'
+    "cursor_pos": 0,
+    "layer": "abc",
     "row": 0,
     "col": 0
 }
 
-# complete layout grids rewritten with natural column lengths and strict category separations
 OSK_LAYERS = {
     "abc": [
         ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"],
@@ -656,36 +688,31 @@ def render_osk():
     draw_rect(screen, t("panel_color"), box_rect, 0)
     draw_rect(screen, t("border_color"), box_rect, 2)
 
-    title_surf = fontsm.render(f"Input: {osk_state['target_el'].get('label', 'Text Field')}", True, t("muted_color"))
+    title_surf = render_text(fontsm, f"Input: {osk_state['target_el'].get('label', 'Text Field')}", t("muted_color"))
     screen.blit(title_surf, (box_x + 20, box_y + 12))
 
-    # input bar measurements
     input_bar_h = int(1.8 * cell_h)
     input_bar_rect = pg.Rect(box_x + 20, box_y + int(1.2 * cell_h), box_w - 40, input_bar_h)
     draw_rect(screen, t("button_color"), input_bar_rect, 0)
     draw_rect(screen, t("button_border"), input_bar_rect, 1)
 
-    # --- TEXT CLIPPING LAYER ---
-    # create a sub-surface specifically for text bounds to prevent leaking out
     text_clip_w = input_bar_rect.width - 20
     text_clip_h = input_bar_rect.height
-    text_surface = pg.Surface((text_clip_w, text_clip_h), pg.SRCALPHA)
+    text_surface = get_cached_surface(text_clip_w, text_clip_h)
+    text_surface.fill((0,0,0,0)) # transparent fill for osk buffer block
+    text_surface.set_colorkey((0,0,0)) # quick chroma clear
 
-    # calculate text measurements and automatic scrolling offset
-    text_val_surf = font.render(osk_state["buffer"], True, t("text_color"))
+    text_val_surf = render_text(font, osk_state["buffer"], t("text_color"))
     prefix_string = osk_state["buffer"][:osk_state["cursor_pos"]]
     prefix_w = font.size(prefix_string)[0]
 
-    # if the text or cursor goes past the box width, scroll it to keep cursor inside views
     text_offset_x = 0
     if prefix_w > text_clip_w - 30:
         text_offset_x = (text_clip_w - 30) - prefix_w
 
-    # render the string inside the clipped local surface area
     text_y_pos = text_clip_h // 2 - text_val_surf.get_height() // 2
     text_surface.blit(text_val_surf, (text_offset_x, text_y_pos))
 
-    # cursor positioning inside the clipped sub-surface
     cursor_x = text_offset_x + prefix_w
     cursor_rect = pg.Rect(cursor_x, text_clip_h // 2 - font.get_height() // 2, 2, font.get_height())
     
@@ -694,11 +721,8 @@ def render_osk():
     else:
         pg.draw.rect(text_surface, t("muted_color"), cursor_rect)
 
-    # stamp the text surface onto the screen input bar position
     screen.blit(text_surface, (input_bar_rect.left + 10, input_bar_rect.top))
-    # ---------------------------
 
-    # dynamic row placement
     start_keys_y = input_bar_rect.bottom + int(0.5 * cell_h)
     row_h = int(2.2 * cell_h)
 
@@ -737,14 +761,14 @@ def render_osk():
                     draw_rect(screen, t("button_border"), k_rect, 1)
                     
             if key != "×":
-                key_surf = font_osk.render(key, True, t("text_color"))
+                key_surf = render_text(font_osk, key, t("text_color"))
                 screen.blit(key_surf, key_surf.get_rect(center=k_rect.center))
             else:
-                key_surf = font_osk_big.render(key, True, t("text_color"))
+                key_surf = render_text(font_osk_big, key, t("text_color"))
                 screen.blit(key_surf, key_surf.get_rect(center=k_rect.center))
 
 # =========================================================
-# RENDERING
+# RENDERING (UPDATED WITH FRUSTUM VIEWPORT CULLING!)
 # =========================================================
 def render_gui(element, x=0, y=0, parent_w=48, parent_h=27, current_path="", target_surf=None, gx=0, gy=0, selectable=True):
     global layout_registry, scroll_states, focus_anim
@@ -763,6 +787,10 @@ def render_gui(element, x=0, y=0, parent_w=48, parent_h=27, current_path="", tar
     el_type = element.get("type", "list")
     is_focused = (focus == current_path)
 
+    # clipping check: is the container bounding box actually visible inside its current surface frame?
+    surf_w, surf_h = target_surf.get_size()
+    is_visible = rect.right > 0 and rect.left < surf_w and rect.bottom > 0 and rect.top < surf_h
+
     if is_focused and selectable and not osk_state["target_active"]:
         focus_anim["active"] = True
         focus_anim["tx"] = int((gx + local_x) * cell_w)
@@ -772,94 +800,91 @@ def render_gui(element, x=0, y=0, parent_w=48, parent_h=27, current_path="", tar
 
     if is_focusable_leaf(element):
         if selectable: layout_registry[current_path] = (gx + local_x, gy + local_y, w, h)
-        draw_rect(target_surf, t("button_color"), rect, 0)
-        draw_rect(target_surf, t("button_border"), rect, 1)
+        
+        # cull draw calls if the item is outside the viewport clip box!
+        if is_visible:
+            draw_rect(target_surf, t("button_color"), rect, 0)
+            draw_rect(target_surf, t("button_border"), rect, 1)
 
-        if el_type == "button":
-            image_drawn = False
-            if "image" in element:
-                img_size = (int(rect.width - 12), int(rect.height - 12))
-                if img_size[0] > 0 and img_size[1] > 0:
-                    img_surf = get_cached_image(element["image"], img_size)
-                    if img_surf:
-                        target_surf.blit(img_surf, img_surf.get_rect(center=rect.center))
-                        image_drawn = True
+            if el_type == "button":
+                image_drawn = False
+                if "image" in element:
+                    img_size = (int(rect.width - 12), int(rect.height - 12))
+                    if img_size[0] > 0 and img_size[1] > 0:
+                        img_surf = get_cached_image(element["image"], img_size)
+                        if img_surf:
+                            target_surf.blit(img_surf, img_surf.get_rect(center=rect.center))
+                            image_drawn = True
 
-            if not image_drawn and "label" in element:
-                text_surf = font.render(element["label"], True, t("text_color"))
-                target_surf.blit(text_surf, text_surf.get_rect(center=rect.center))
-            
-        elif el_type == "checkbox":
-            text_surf = font.render(element.get("label", ""), True, t("text_color"))
-            target_surf.blit(text_surf, text_surf.get_rect(left=rect.left + 15, centery=rect.centery))
-            
-            box_sz = int(rect.height * 0.45)
-            box_rect = pg.Rect(rect.right - box_sz - 15, rect.centery - box_sz // 2, box_sz, box_sz)
-            draw_rect(target_surf, t("panel_color"), box_rect, 0, radius=4)
-            draw_rect(target_surf, t("border_color"), box_rect, 1, radius=4)
-            
-            if element.get("checked", False):
-                inner_sz = box_sz - 6
-                draw_rect(target_surf, t("accent_color"), pg.Rect(box_rect.left + 3, box_rect.top + 3, inner_sz, inner_sz), 0, radius=2)
-
-        elif el_type == "textinput":
-            lbl_surf = fontmed.render(element.get("label", ""), True, t("muted_color"))
-            target_surf.blit(lbl_surf, (rect.left + 12, rect.top + 4))
-            
-            val_string = element.get("value", "")
-            display_color = t("text_color") if val_string else t("muted_color")
-            if not val_string: 
-                val_string = element.get("placeholder", "")
+                if not image_drawn and "label" in element:
+                    text_surf = render_text(font, element["label"], t("text_color"))
+                    target_surf.blit(text_surf, text_surf.get_rect(center=rect.center))
                 
-            # --- INPUT BOX TEXT CLIPPING ---
-            # calculate available space inside the element bounds
-            clip_w = rect.width - 24
-            clip_h = font.get_height() + 4
-            input_text_surface = pg.Surface((clip_w, clip_h), pg.SRCALPHA)
-            
-            # render full string text
-            val_surf = font.render(val_string, True, display_color)
-            
-            # calculate cursor offset tracking for the layout box string
-            # if we are currently editing this specific element in the osk, we use the osk cursor
-            if osk_state["target_active"] and osk_state["target_el"] == element:
-                prefix_string = osk_state["buffer"][:osk_state["cursor_pos"]]
-                prefix_w = font.size(prefix_string)[0]
-            else:
-                prefix_w = val_surf.get_width()
-
-            # automatically scroll text left if it overflows the layout box width
-            text_offset_x = 0
-            if prefix_w > clip_w - 10:
-                text_offset_x = (clip_w - 10) - prefix_w
+            elif el_type == "checkbox":
+                text_surf = render_text(font, element.get("label", ""), t("text_color"))
+                target_surf.blit(text_surf, text_surf.get_rect(left=rect.left + 15, centery=rect.centery))
                 
-            # blit the string onto our local clip layer
-            input_text_surface.blit(val_surf, (text_offset_x, 0))
-            
-            # stamp the clip layer onto the main GUI target surface
-            target_surf.blit(input_text_surface, (rect.left + 12, rect.bottom - clip_h - 12))
-            # -------------------------------
+                box_sz = int(rect.height * 0.45)
+                box_rect = pg.Rect(rect.right - box_sz - 15, rect.centery - box_sz // 2, box_sz, box_sz)
+                draw_rect(target_surf, t("panel_color"), box_rect, 0, radius=4)
+                draw_rect(target_surf, t("border_color"), box_rect, 1, radius=4)
+                
+                if element.get("checked", False):
+                    inner_sz = box_sz - 6
+                    draw_rect(target_surf, t("accent_color"), pg.Rect(box_rect.left + 3, box_rect.top + 3, inner_sz, inner_sz), 0, radius=2)
+
+            elif el_type == "textinput":
+                lbl_surf = render_text(fontmed, element.get("label", ""), t("muted_color"))
+                target_surf.blit(lbl_surf, (rect.left + 12, rect.top + 4))
+                
+                val_string = element.get("value", "")
+                display_color = t("text_color") if val_string else t("muted_color")
+                if not val_string: 
+                    val_string = element.get("placeholder", "")
+                    
+                clip_w = rect.width - 24
+                clip_h = font.get_height() + 4
+                input_text_surface = get_cached_surface(clip_w, clip_h)
+                input_text_surface.fill((0,0,0,0))
+                input_text_surface.set_colorkey((0,0,0))
+                
+                val_surf = render_text(font, val_string, display_color)
+                
+                if osk_state["target_active"] and osk_state["target_el"] == element:
+                    prefix_string = osk_state["buffer"][:osk_state["cursor_pos"]]
+                    prefix_w = font.size(prefix_string)[0]
+                else:
+                    prefix_w = val_surf.get_width()
+
+                text_offset_x = 0
+                if prefix_w > clip_w - 10:
+                    text_offset_x = (clip_w - 10) - prefix_w
+                    
+                input_text_surface.blit(val_surf, (text_offset_x, 0))
+                target_surf.blit(input_text_surface, (rect.left + 12, rect.bottom - clip_h - 12))
         return
 
     if el_type in ("image", "label", "progress"):
-        if el_type == "label" and "label" in element:
-            text_surf = fontsm.render(element["label"], True, t("text_soft_color")) if "small" in element else font.render(element["label"], True, t("text_soft_color"))
-            target_surf.blit(text_surf, text_surf.get_rect(left=rect.left + 6, centery=rect.centery))
-        elif el_type == "progress":
-            draw_rect(target_surf, t("panel_color"), rect, 0)
-            draw_rect(target_surf, t("border_color"), rect, 1)
-            value = float(element.get("value", 0))
-            maximum = float(element.get("max", 100))
-            fraction = max(0.0, min(1.0, value / maximum if maximum else 0.0))
-            
-            pad = int(element.get("padding", 2))
-            inner = rect.inflate(-pad * 2, -pad * 2)
-            fill_w = int(inner.width * fraction)
-            if fill_w > 0 and inner.height > 0:
-                draw_rect(target_surf, t("accent_color"), pg.Rect(inner.left, inner.top, fill_w, inner.height), 0)
+        if is_visible:
+            if el_type == "label" and "label" in element:
+                f = fontsm if "small" in element else font
+                text_surf = render_text(f, element["label"], t("text_soft_color"))
+                target_surf.blit(text_surf, text_surf.get_rect(left=rect.left + 6, centery=rect.centery))
+            elif el_type == "progress":
+                draw_rect(target_surf, t("panel_color"), rect, 0)
+                draw_rect(target_surf, t("border_color"), rect, 1)
+                value = float(element.get("value", 0))
+                maximum = float(element.get("max", 100))
+                fraction = max(0.0, min(1.0, value / maximum if maximum else 0.0))
+                
+                pad = int(element.get("padding", 2))
+                inner = rect.inflate(-pad * 2, -pad * 2)
+                fill_w = int(inner.width * fraction)
+                if fill_w > 0 and inner.height > 0:
+                    draw_rect(target_surf, t("accent_color"), pg.Rect(inner.left, inner.top, fill_w, inner.height), 0)
         return
 
-    if not is_focusable_leaf(element):
+    if is_visible:
         if not (el_id == activelayout or (rect.topleft == (0,0) and rect.bottomright == (screen.get_width(),screen.get_height()))):
             draw_rect(target_surf, t("panel_color"), rect, 0)
             draw_rect(target_surf, t("border_color"), rect, 1)
@@ -899,12 +924,16 @@ def render_gui(element, x=0, y=0, parent_w=48, parent_h=27, current_path="", tar
                     scroll_states[el_id]["target"] = (focused_child_y + focused_child_h) - content_h
 
             scroll_states[el_id]["current"] = advance_anim(scroll_states[el_id]["current"], scroll_states[el_id]["target"], element.get("anim_speed", t("animation_speed", 0.25)), element.get("anim_type", t("animation_type", "ease_out")), 0)
-            clip_surface = pg.Surface((max(1, int(content_w * cell_w)), max(1, int(content_h * cell_h))))
-            clip_surface.fill(tuple(t("panel_color")))
+            
+            cw, ch = max(1, int(content_w * cell_w)), max(1, int(content_h * cell_h))
+            clip_surface = get_cached_surface(cw, ch, t("panel_color"))
 
             for child, child_w, child_h, relative_y in child_layouts:
+                # children calculate positions relative to the scroll clip sheet surface
                 render_gui(child, 0, relative_y - scroll_states[el_id]["current"], child_w, child_h, current_path, clip_surface, gx + content_x, gy + content_y, selectable)
-            target_surf.blit(clip_surface, (int(content_x * cell_w), int(content_y * cell_h)))
+            
+            if is_visible:
+                target_surf.blit(clip_surface, (int(content_x * cell_w), int(content_y * cell_h)))
 
         else:
             cursor_x, cursor_y = content_x, content_y
@@ -931,7 +960,7 @@ def render_sidebar():
     draw_rect(screen, t("border_color"), sidebar_rect, 1)
 
     header_rect = pg.Rect(sidebar_rect.left, sidebar_rect.top, sidebar_rect.width, int(3 * cell_h))
-    header_text = font.render(appName, True, t("accent_color"))
+    header_text = render_text(font, appName, t("accent_color"))
     screen.blit(header_text, header_text.get_rect(center=header_rect.center))
 
     item_start_y, item_h, item_gap = 4.0, 3.0, 0.5
@@ -955,7 +984,7 @@ def render_sidebar():
 
         draw_rect(screen, fill, item_rect, 0)
         draw_rect(screen, border, item_rect, 1)
-        label = font.render(item["label"], True, t("text_color"))
+        label = render_text(font, item["label"], t("text_color"))
         screen.blit(label, label.get_rect(center=item_rect.center))
 
 def set_layouts(setlayouts):
@@ -974,10 +1003,8 @@ def check_mouse_hover_and_click(click_event=False):
     global focus, last_content_focus
     mx, my = pg.mouse.get_pos()
 
-    # 1. if sidebar is open, calculate its exact screen width boundary
     if sidebar_state["open"]:
         sidebar_w = float(t("sidebar_width", 10))
-        # if the mouse is physically within the sidebar's area, ONLY check sidebar items
         if mx <= int(sidebar_w * cell_w):
             for path, (bx, by, bw, bh) in sidebar_registry.items():
                 rect = pg.Rect(int(bx * cell_w), int(by * cell_h), int(bw * cell_w), int(bh * cell_h))
@@ -989,9 +1016,8 @@ def check_mouse_hover_and_click(click_event=False):
                                 run_action(item)
                                 return True
                     return True
-            return False  # swallowed inside sidebar bounds, don't pass to layout underneath
+            return False
 
-    # 2. only check regular content layout if we didn't hit the sidebar logic above
     for path, (bx, by, bw, bh) in layout_registry.items():
         rect = pg.Rect(int(bx * cell_w), int(by * cell_h), int(bw * cell_w), int(bh * cell_h))
         if rect.collidepoint(mx, my):
@@ -1024,9 +1050,9 @@ def check_osk_mouse(click_event=False):
     for r_idx, row in enumerate(grid):
         total_keys = len(row)
         avail_w = box_w - 40
-        key_w_float = avail_w / total_keys
 
         for c_idx, key in enumerate(row):
+            key_w_float = avail_w / total_keys
             kx = box_x + 20 + int(c_idx * key_w_float)
             kx_next = box_x + 20 + int((c_idx + 1) * key_w_float)
             ky = start_keys_y + (r_idx * row_h)
@@ -1045,24 +1071,27 @@ def check_osk_mouse(click_event=False):
 mposx = 40000
 def lerptuple(a, b, t):
     return tuple(start + t * (end - start) for start, end in zip(a, b))
+
 def mainloop():
-    global focus, focus_anim,cell_w,cell_h,mposx
+    global focus, focus_anim, cell_w, cell_h, mposx
     grad_fade = 0
     prev_pos = (4000,4000)
     ti = 400
     running = True
     focus_anim = {"x": 0, "y": 0, "w": 0, "h": 0, "tx": 0, "ty": 0, "tw": 0, "th": 0, "active": False}
+    
     try:
         cursor_surface = pg.image.load("whiplash/pointer.png").convert_alpha()
     except:
         cursor_surface = pg.image.load("/opt/flowtv/pointer.png").convert_alpha()
+        
     pg.mouse.set_visible(False)
+    
     while running:
         for ev in pg.event.get():
             if ev.type == pg.QUIT:
                 running = False
                 
-            # --- unified input handling (keyboard & gamepad) ---
             action = None
             is_back_action = False
 
@@ -1075,18 +1104,15 @@ def mainloop():
                 elif ev.key == pg.K_RETURN:  action = "select"
 
             elif ev.type == pg.JOYBUTTONDOWN:
-                # standard button mappings (A for select, B for back)
-                if ev.button == 0:    action = "select"            # A / OK
-                elif ev.button == 1:  is_back_action = True        # B / Back
+                if ev.button == 0:    action = "select"
+                elif ev.button == 1:  is_back_action = True
 
             elif ev.type == pg.JOYHATMOTION:
-                # ev.value returns an (x, y) tuple. e.g. (0, 1) is UP, (-1, 0) is LEFT
                 if ev.value == (0, 1):    action = "up"
                 elif ev.value == (0, -1): action = "down"
                 elif ev.value == (-1, 0): action = "left"
                 elif ev.value == (1, 0):  action = "right"
 
-            # --- execute actions if triggered ---
             if is_back_action:
                 if osk_state["target_active"]: 
                     osk_state["target_active"] = False
@@ -1117,10 +1143,9 @@ def mainloop():
                     else:
                         handle_layout_input(action)
 
-            # --- window, mouse & layout events ---
             elif ev.type == pg.VIDEORESIZE:
                 global font, fontsm, font_osk, font_osk_big, fontmed
-                print("Recompiling fonts.")
+                print("Recompiling fonts and clearing caches.")
                 cell_w = screen.get_width() / 48
                 cell_h = screen.get_height() / 27
                 font = get_font(cell_h)
@@ -1128,6 +1153,7 @@ def mainloop():
                 font_osk = get_font(cell_h)
                 font_osk_big = get_font(cell_h * 1.5)
                 fontmed = get_font(cell_h / 1.5)
+                clear_caches()
 
             elif ev.type == pg.MOUSEMOTION:
                 mposx = pg.mouse.get_pos()[0]
@@ -1138,11 +1164,12 @@ def mainloop():
                 ti = 0
 
             elif ev.type == pg.MOUSEBUTTONDOWN:
-                if ev.button == 1:  # left click
+                if ev.button == 1:
                     if osk_state["target_active"]:
                         check_osk_mouse(click_event=True)
                     else:
                         check_mouse_hover_and_click(click_event=True)
+                        
         if not osk_state["target_active"]:
             handle_focus_memory()
 
@@ -1154,15 +1181,16 @@ def mainloop():
 
         render_gui(layouts[activelayout])
         render_sidebar()
-        
         render_osk()
+        
         if mposx < cell_w*3 and not sidebar_state["open"]:
             grad_fade = grad_fade + (255 - grad_fade) * 0.1
             if mposx < cell_w:
                 sidebar_open()
         else:
             grad_fade = grad_fade + (- grad_fade) * 0.1
-        draw_linear_gradient(screen, tuple(t("accent_color")) + (int(grad_fade),),tuple(t("accent_color")) + (0,),pg.Rect(0,0,cell_w*4,screen.get_height()),'horizontal')
+            
+        draw_linear_gradient(screen, tuple(t("accent_color")) + (int(grad_fade),), tuple(t("accent_color")) + (0,), pg.Rect(0,0,cell_w*4,screen.get_height()), 'horizontal')
 
         if focus_anim["active"] and not osk_state["target_active"]:
             focus_anim["x"] = advance_anim(focus_anim["x"], focus_anim["tx"], float(t("animation_speed", 0.25)), t("animation_type", "ease_out"))
@@ -1178,15 +1206,18 @@ def mainloop():
                 int(t("focus_outline_width", 3)),
                 border_radius=clamp_radius(t("corner_roundness", 8), highlight_rect),
             )
-        prev_pos = lerptuple(prev_pos,pg.mouse.get_pos(),.5)
+            
+        prev_pos = lerptuple(prev_pos, pg.mouse.get_pos(), .5)
         if ti < 5:
-            screen.blit(cursor_surface,prev_pos)
+            screen.blit(cursor_surface, prev_pos)
         ti = ti + (clock.get_time() / 1000.0)
+        
         pg.display.update()
         clock.tick(60)
+        pg.display.set_caption("Whiplash | FPS: "+str(clock.get_fps()))
         
-
     save_config(config, CONFIG_PATH)
     pg.quit()
+
 if __name__ == "__main__":
     mainloop()
