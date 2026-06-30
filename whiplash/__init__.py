@@ -1183,7 +1183,7 @@ def mainloop():
             screen.blit(cursor_surface,prev_pos)
         ti = ti + (clock.get_time() / 1000.0)
         pg.display.update()
-        clock.tick(90)
+        clock.tick(60)
         
 
     save_config(config, CONFIG_PATH)
